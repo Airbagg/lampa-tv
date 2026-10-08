@@ -29,7 +29,10 @@
         '<path d="M19.5 2l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" fill="currentColor"/></svg>';
 
     function log() {
-        try { console.log.apply(console, ['AutoTorrent'].concat([].slice.call(arguments))); } catch (e) {}
+        var args = [].slice.call(arguments);
+        try { console.log.apply(console, ['AutoTorrent'].concat(args)); } catch (e) {}
+        // DEBUG: временно шлём лог на мак
+        try { new Image().src = 'http://192.168.0.139:8767/l?' + encodeURIComponent(JSON.stringify(args).slice(0, 1500)); } catch (e) {}
     }
 
     function noty(text) {
@@ -231,6 +234,8 @@
             var target = k >= 0 && files.eq(k).length ? files.eq(k) : box.find('.selector.focus').first();
             if (!target.length) target = files.length ? files.first() : found.first();
             var what = k >= 0 && items[k] ? (items[k].path_human || items[k].path || '').split('/').pop() : '';
+            log('list', {items: items.length, ids: items.slice(0, 3).map(function (x) { return x.id; }),
+                viewed: params && params.viewed, k: k, files: files.length, found: found.length, what: what});
 
             setTimeout(function () {
                 if (cancelled) return;
