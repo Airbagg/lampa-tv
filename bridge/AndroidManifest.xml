@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="local.vlcbridge"
+    android:versionCode="5"
+    android:versionName="1.4">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34" />
+
+    <!-- Проба кодека читает начало потока с TorrServer (http://127.0.0.1:8090) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Чтобы на Android 11+ видеть плееры и запускать их по имени пакета -->
+    <queries>
+        <package android:name="org.videolan.vlc" />
+        <package android:name="com.brouken.player" />
+    </queries>
+
+    <application
+        android:label="VLC для Лампы"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
+
+        <!-- Невидимый посредник: Лампа видит его как видеоплеер,
+             он смотрит кодек и отдаёт ссылку в VLC (AV1 — в Just Player)
+             отдельной задачей и закрывается. -->
+        <activity
+            android:name=".BridgeActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
