@@ -122,7 +122,7 @@
         return /сезон|season|\bs\d{1,2}/.test(t) ? 1 : 0;
     }
 
-    function score(el, card, viewedHashes) {
+    function score(el, card, viewedHashes, rec) {
         var t = ((el.Title || el.title || '') + '').toLowerCase();
 
         if (/camrip|\bcam\b|telesync|\bhdts\b|\bts\b|\btc\b|экранк|трейлер|trailer|soundtrack|\bost\b/.test(t)) return null;
@@ -135,12 +135,15 @@
         var s = 0;
         var why = [];
 
-        if (el.hash && viewedHashes.indexOf(el.hash) >= 0) { s += 200; why.push('смотрели'); }
+        // Раздача, которую смотрели в этой карточке последней, — та же озвучка.
+        // Просто когда-то открытая — небольшой плюс.
+        if (rec && rec.torrent && el.hash == rec.torrent) { s += 200; why.push('последняя'); }
+        else if (el.hash && viewedHashes.indexOf(el.hash) >= 0) { s += 40; why.push('смотрели'); }
 
         s += ({2160: 90, 1080: 100, 720: 70})[res] || (res ? 30 : 50);
         s += ({dub: 50, mvo: 25, avo: 10, ru: 5, none: -30})[voice];
 
-        if (cod == 'av1') s -= 40;
+        if (cod == 'av1') s -= 80;
         if (/dolby vision|\bdv\b|\bdovi\b/.test(t) && !/hdr10|hdr\b/.test(t)) s -= 60;
 
         if (seeds < 2) s -= 100;
@@ -168,7 +171,7 @@
 
         var scored = [];
         for (var i = 0; i < results.length; i++) {
-            var r = score(results[i], card, viewed);
+            var r = score(results[i], card, viewed, getRecord(card.id));
             if (r) scored.push(r);
         }
         scored.sort(function (a, b) { return b.score - a.score; });
@@ -185,26 +188,122 @@
         return parts.join(' · ');
     }
 
-    // Файл, на котором остановились. Лампа сама подсвечивает серию по своей
-    // истории просмотра, но внешний плеер ей позицию не возвращает — поэтому
-    // берём из TorrServer: он помнит каждый открытый файл раздачи (params.viewed).
-    // Самый дальний открытый — туда и идём; VLC продолжит с места внутри серии,
-    // а плейлист посредника — следующие серии.
-    function continueIndex(items, params) {
-        var viewed = (params && params.viewed) || [];
-        var lastId = -1;
-        for (var i = 0; i < viewed.length; i++) {
-            var id = parseInt(viewed[i].file_index, 10);
-            if (!isNaN(id) && id > lastId) lastId = id;
+    // Память плагина: по каждой карточке — последняя раздача и серия.
+    var REC_KEY = 'autotorrent_last';
+
+    function getRecord(id) {
+        try { return (Lampa.Storage.get(REC_KEY, '{}') || {})[id] || null; } catch (e) { return null; }
+    }
+
+    function setRecord(id, patch) {
+        if (!id) return;
+        try {
+            var all = Lampa.Storage.get(REC_KEY, '{}') || {};
+            var r = all[id] || {};
+            for (var k in patch) r[k] = patch[k];
+            r.time = Date.now();
+            all[id] = r;
+            Lampa.Storage.set(REC_KEY, all);
+        } catch (e) {}
+    }
+
+    function parseSE(path) {
+        var p = (path || '').toLowerCase();
+        var m = p.match(/s(\d{1,2})\s?e(\d{1,3})/) || p.match(/(\d{1,2})x(\d{2,3})/);
+        if (m) return [parseInt(m[1], 10), parseInt(m[2], 10)];
+        var se = p.match(/(\d{1,2})\s*сезон/) || p.match(/сезон\s*(\d{1,2})/) || p.match(/season\s*(\d{1,2})/);
+        var ep = p.match(/(\d{1,3})\s*сери/) || p.match(/сери[яи]\s*(\d{1,3})/) || p.match(/episode\s*(\d{1,3})/);
+        return se && ep ? [parseInt(se[1], 10), parseInt(ep[1], 10)] : null;
+    }
+
+    function tsPost(path, body, done) {
+        var base = '';
+        try { base = Lampa.Torserver.url(); } catch (e) {}
+        if (!base) return done(null);
+        var x = new XMLHttpRequest();
+        x.open('POST', base.replace(/\/$/, '') + path, true);
+        x.setRequestHeader('Content-Type', 'application/json');
+        x.timeout = 5000;
+        x.onload = function () { try { done(JSON.parse(x.responseText)); } catch (e) { done(null); } };
+        x.onerror = x.ontimeout = function () { done(null); };
+        x.send(JSON.stringify(body));
+    }
+
+    // Нет памяти плагина (сериал начат до него) — ищем в истории TorrServer:
+    // самая дальняя серия этого сериала среди всех раздач, что он помнит.
+    function serverLastEpisode(card, done) {
+        var names = [card.original_name, card.name, card.original_title, card.title]
+            .filter(Boolean).map(function (n) { return (n + '').toLowerCase(); });
+        tsPost('/viewed', {action: 'list'}, function (viewed) {
+            tsPost('/torrents', {action: 'list'}, function (torrents) {
+                if (!viewed || !viewed.length || !torrents) return done(null);
+                var best = null, pending = 0;
+                torrents.forEach(function (t) {
+                    var title = (t.title || t.name || '').toLowerCase();
+                    var mine = names.some(function (n) { return title.indexOf(n) >= 0; });
+                    var idx = viewed.filter(function (v) { return v.hash == t.hash; })
+                        .map(function (v) { return v.file_index; });
+                    if (!mine || !idx.length) return;
+                    pending++;
+                    tsPost('/torrents', {action: 'get', hash: t.hash}, function (full) {
+                        ((full && full.file_stats) || []).forEach(function (f) {
+                            if (idx.indexOf(f.id) < 0) return;
+                            var se = parseSE(f.path);
+                            if (se && (!best || se[0] > best[0] || (se[0] == best[0] && se[1] > best[1]))) best = se;
+                        });
+                        if (--pending == 0) done(best);
+                    });
+                });
+                if (!pending) done(null);
+            });
+        });
+    }
+
+    function findEpisode(items, se) {
+        for (var k = 0; k < items.length; k++) {
+            if (items[k].season == se[0] && items[k].episode == se[1]) return k;
         }
-        if (lastId < 0) return -1;
-        for (var k = 0; k < items.length; k++) if (items[k].id == lastId) return k;
+        for (var j = 0; j < items.length; j++) {
+            var p = parseSE(items[j].path || items[j].path_human);
+            if (p && p[0] == se[0] && p[1] == se[1]) return j;
+        }
         return -1;
     }
 
-    // После открытия списка файлов: ждём, пока Лампа его нарисует, и жмём
-    // на серию, на которой остановились (или на ту, что Лампа сфокусировала).
-    function autoplayFiles(items, params) {
+    // Какой файл запускать: серия из памяти плагина → последний открытый файл
+    // этой раздачи по TorrServer → самая дальняя серия сериала по истории
+    // TorrServer → то, что подсветила сама Лампа.
+    function decideTarget(items, card, done) {
+        var rec = getRecord(card.id);
+        if (rec && rec.s && rec.e) {
+            var k = findEpisode(items, [rec.s, rec.e]);
+            if (k >= 0) return done(k, 'память');
+        }
+
+        var link = '';
+        for (var i = 0; i < items.length && !link; i++) {
+            var m = (items[i].url || '').match(/[?&]link=([0-9a-f]{40})/i);
+            if (m) link = m[1].toLowerCase();
+        }
+
+        tsPost('/viewed', {action: 'list', hash: link}, function (viewed) {
+            var lastId = -1;
+            (viewed || []).forEach(function (v) {
+                if (v.hash == link && v.file_index > lastId) lastId = v.file_index;
+            });
+            if (lastId >= 0) {
+                for (var j = 0; j < items.length; j++) if (items[j].id == lastId) return done(j, 'раздача');
+            }
+            if (!card.number_of_seasons) return done(-1, '');
+            serverLastEpisode(card, function (se) {
+                done(se ? findEpisode(items, se) : -1, se ? 'история' : '');
+            });
+        });
+    }
+
+    // После открытия списка файлов: ждём, пока Лампа его нарисует, выбираем
+    // файл и через пару секунд жмём на него.
+    function autoplayFiles(items, card) {
         var cancelled = false;
         var started = Date.now();
 
@@ -228,28 +327,26 @@
             // Лампа сама включает 10-секундный автостарт, если файл один, —
             // глушим его так же, как это делает нажатие любой кнопки.
             try { Lampa.Keypad.listener.send('keydown', {code: 0, enabled: true, event: {}}); } catch (e) {}
+            try { Lampa.Keypad.listener.follow('keydown', onKey); } catch (e) {}
 
-            var files = box.find('.torrent-file, .torrent-serial');
-            var k = continueIndex(items, params);
-            var target = k >= 0 && files.eq(k).length ? files.eq(k) : box.find('.selector.focus').first();
-            if (!target.length) target = files.length ? files.first() : found.first();
-            var what = k >= 0 && items[k] ? (items[k].path_human || items[k].path || '').split('/').pop() : '';
-            log('list', {items: items.length, ids: items.slice(0, 3).map(function (x) { return x.id; }),
-                viewed: params && params.viewed, k: k, files: files.length, found: found.length, what: what});
-
-            setTimeout(function () {
+            decideTarget(items, card, function (k, how) {
                 if (cancelled) return;
-                try { Lampa.Keypad.listener.follow('keydown', onKey); } catch (e) {}
-                noty('Авто: ' + (what ? 'продолжаю «' + what + '» ' : '') +
-                    'через ' + COUNTDOWN_SEC + ' с · любая кнопка — отмена');
+                var files = box.find('.torrent-file, .torrent-serial');
+                var target = k >= 0 && files.eq(k).length ? files.eq(k) : box.find('.selector.focus').first();
+                if (!target.length) target = files.length ? files.first() : found.first();
+                var it = k >= 0 ? items[k] : null;
+                var what = it ? (it.season && it.episode ? 'S' + it.season + ' E' + it.episode
+                    : (it.path_human || it.path || '').split('/').pop()) : '';
+                log('target', {k: k, how: how, what: what, files: files.length});
+
+                noty('Авто: ' + (what ? what + ' · ' : '') + 'запуск через ' + COUNTDOWN_SEC + ' с · любая кнопка — отмена');
 
                 setTimeout(function () {
                     cleanup();
-                    if (cancelled) return;
-                    log('play', k, what);
+                    if (cancelled || !$.contains(document, target[0])) return;
                     target.trigger('hover:enter');
                 }, COUNTDOWN_SEC * 1000);
-            }, 200);
+            });
         }
 
         setTimeout(waitList, 300);
@@ -271,11 +368,12 @@
 
             var el = best.el;
             el.poster = card.img;
+            setRecord(card.id, {torrent: el.hash, title: el.Title});
 
             var onList = function (e) {
                 if (e.type == 'list_open') {
                     Lampa.Listener.remove('torrent_file', onList);
-                    autoplayFiles(e.items || [], e.params || {});
+                    autoplayFiles(e.items || [], card);
                 }
             };
             Lampa.Listener.follow('torrent_file', onList);
@@ -317,7 +415,24 @@
         torrentBtn.before(btn);
     }
 
+    function remember() {
+        // Запоминаем и ручной выбор: раздачу из списка торрентов и серию из списка файлов
+        Lampa.Listener.follow('torrent', function (e) {
+            if (e.type != 'onenter' || !e.element) return;
+            var a = null;
+            try { a = Lampa.Activity.active(); } catch (err) {}
+            if (a && a.movie) setRecord(a.movie.id, {torrent: e.element.hash, title: e.element.Title});
+        });
+        Lampa.Listener.follow('torrent_file', function (e) {
+            if (e.type != 'onenter' || !e.element || !e.params || !e.params.movie) return;
+            var se = e.element.season && e.element.episode ? [e.element.season, e.element.episode]
+                : parseSE(e.element.path || e.element.path_human);
+            setRecord(e.params.movie.id, se ? {s: se[0], e: se[1]} : {s: 0, e: 0});
+        });
+    }
+
     function start() {
+        remember();
         Lampa.Listener.follow('full', addButton);
         log('ready');
     }
