@@ -1,8 +1,5 @@
 package local.vlcbridge;
 
-import android.animation.Animator;
-import android.animation.AnimatorListenerAdapter;
-import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.PixelFormat;
 import android.os.Build;
@@ -12,15 +9,14 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
-import android.view.animation.LinearInterpolator;
 
 /**
  * Окно с кнопкой «Пропустить …» поверх плеера.
  *
  * Пока кнопка на экране, окно в фокусе: ОК — пропустить сразу, Назад —
- * отменить автопропуск, остальные кнопки пульта тоже отменяют (зритель
- * взялся за управление сам). Если ничего не нажимать, кнопка заполняется
- * слева направо и в конце пропускает сама.
+ * отменить автопропуск (событие съедаем, чтобы плеер не закрылся), стрелки —
+ * кнопка упруго кивает. Если ничего не нажимать, кнопка заполняется слева
+ * направо и в конце пропускает сама. Отсчёт и анимации — в SkipButtonView.
  */
 class SkipOverlay {
     private static final String TAG = "VlcBridgeSkip";
@@ -36,9 +32,7 @@ class SkipOverlay {
     private final Context ctx;
     private final WindowManager wm;
     private SkipButtonView view;
-    private ValueAnimator countdown;
     private Listener listener;
-    private boolean attached;
 
     SkipOverlay(Context ctx) {
         this.ctx = ctx.getApplicationContext();
@@ -52,21 +46,58 @@ class SkipOverlay {
         }
         removeNow();
         listener = l;
-        view = new SkipButtonView(ctx, kind);
-        view.setFocusable(true);
-        view.setFocusableInTouchMode(true);
-        view.setOnKeyListener(new View.OnKeyListener() {
+        final SkipButtonView v = new SkipButtonView(ctx, kind);
+        view = v;
+        v.setCallbacks(new SkipButtonView.Callbacks() {
             @Override
-            public boolean onKey(View v, int code, KeyEvent e) {
-                if (e.getAction() != KeyEvent.ACTION_UP) return true;
-                if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
-                        || code == KeyEvent.KEYCODE_NUMPAD_ENTER || code == KeyEvent.KEYCODE_BUTTON_A) {
-                    view.press();
-                    finish(true);
-                } else {
-                    finish(false);
+            public void onConfirm() {
+                Listener cur = listener;
+                listener = null;
+                if (cur != null) cur.onConfirm();
+            }
+
+            @Override
+            public void onGone() {
+                remove(v);
+                if (view == v) view = null;
+            }
+        });
+        v.setFocusable(true);
+        v.setFocusableInTouchMode(true);
+        v.setOnKeyListener(new View.OnKeyListener() {
+            @Override
+            public boolean onKey(View view, int code, KeyEvent e) {
+                boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+                if (e.getRepeatCount() > 0) return true;
+                switch (code) {
+                    case KeyEvent.KEYCODE_DPAD_CENTER:
+                    case KeyEvent.KEYCODE_ENTER:
+                    case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                    case KeyEvent.KEYCODE_BUTTON_A:
+                        if (down) v.pressDown();
+                        else v.confirm();
+                        return true;
+                    case KeyEvent.KEYCODE_BACK:
+                    case KeyEvent.KEYCODE_ESCAPE:
+                        if (!down) dismiss();
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_LEFT:
+                        if (down) v.nod(-1, 0);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_RIGHT:
+                        if (down) v.nod(1, 0);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_UP:
+                        if (down) v.nod(0, -1);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_DOWN:
+                        if (down) v.nod(0, 1);
+                        return true;
+                    default:
+                        // Остальное (громкость, пауза и т.п.) — не наше, но и плееру
+                        // не дойдёт, пока мы в фокусе; отдаём системе
+                        return false;
                 }
-                return true;
             }
         });
 
@@ -78,89 +109,42 @@ class SkipOverlay {
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.BOTTOM | Gravity.END;
-        p.x = view.marginEnd();
-        p.y = view.marginBottom();
+        p.x = v.windowX();
+        p.y = v.windowY();
         p.setTitle("LampaSkip");
         try {
-            wm.addView(view, p);
-            attached = true;
+            wm.addView(v, p);
         } catch (Exception e) {
             Log.w(TAG, "addView failed", e);
+            view = null;
             return;
         }
-        view.requestFocus();
-        view.enter();
-
-        countdown = ValueAnimator.ofFloat(0f, 1f);
-        countdown.setDuration(view.countdownMs());
-        countdown.setStartDelay(view.enterMs());
-        countdown.setInterpolator(new LinearInterpolator());
-        countdown.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-            @Override
-            public void onAnimationUpdate(ValueAnimator a) {
-                if (view != null) view.setProgress((Float) a.getAnimatedValue());
-            }
-        });
-        countdown.addListener(new AnimatorListenerAdapter() {
-            private boolean cancelled;
-
-            @Override
-            public void onAnimationCancel(Animator a) {
-                cancelled = true;
-            }
-
-            @Override
-            public void onAnimationEnd(Animator a) {
-                if (!cancelled) finish(true);
-            }
-        });
-        countdown.start();
+        v.requestFocus();
     }
 
     /** Видео на паузе — отсчёт тоже на паузе. */
     void setPaused(boolean paused) {
-        if (countdown == null || Build.VERSION.SDK_INT < 19) return;
-        if (paused && countdown.isRunning() && !countdown.isPaused()) countdown.pause();
-        else if (!paused && countdown.isPaused()) countdown.resume();
+        if (view != null) view.setPaused(paused);
     }
 
-    /** Убрать кнопку без решения (зритель перемотал за пределы отрезка). */
+    /** Убрать кнопку без решения (отрезок кончился или перемотали руками). */
     void hide(boolean animate) {
-        if (countdown != null) countdown.cancel();
-        countdown = null;
         listener = null;
-        if (!attached || view == null) return;
-        if (animate) {
-            final SkipButtonView v = view;
-            v.exit(new Runnable() {
-                @Override
-                public void run() {
-                    remove(v);
-                }
-            });
-            view = null;
-            attached = false;
-        } else {
-            removeNow();
-        }
+        if (view == null) return;
+        if (animate) view.end();
+        else removeNow();
     }
 
-    private void finish(boolean confirm) {
-        Listener l = listener;
+    private void dismiss() {
+        Listener cur = listener;
         listener = null;
-        if (countdown != null) countdown.cancel();
-        countdown = null;
-        if (l != null) {
-            if (confirm) l.onConfirm();
-            else l.onDismiss();
-        }
-        hide(true);
+        if (view != null) view.cancel();
+        if (cur != null) cur.onDismiss();
     }
 
     private void removeNow() {
-        if (attached && view != null) remove(view);
+        if (view != null) remove(view);
         view = null;
-        attached = false;
     }
 
     private void remove(View v) {
