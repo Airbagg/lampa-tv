@@ -21,7 +21,7 @@ import android.view.WindowManager;
 class SkipOverlay {
     private static final String TAG = "VlcBridgeSkip";
 
-    enum Kind { INTRO, CREDITS, NEXT }
+    enum Kind { INTRO, CREDITS, NEXT, STINGER }
 
     interface Listener {
         void onConfirm();

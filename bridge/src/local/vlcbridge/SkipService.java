@@ -66,7 +66,7 @@ public class SkipService extends NotificationListenerService
     private long durMs;
     private volatile long playerUs = -1;
     private EpisodeListener startEar, endEar;
-    private boolean startTried, endTried;
+    private boolean startTried, endTried, stingerTried;
     private JSONObject seg = new JSONObject();
     private final List<String> handled = new ArrayList<>();
     private String showing;
@@ -96,7 +96,7 @@ public class SkipService extends NotificationListenerService
 
     /**
      * Показать кнопку без серии — посмотреть вид и анимацию на телевизоре:
-     * adb shell am broadcast -a local.vlcbridge.DEBUG_SHOW --es kind intro|next -p local.vlcbridge
+     * adb shell am broadcast -a local.vlcbridge.DEBUG_SHOW --es kind intro|next|stinger -p local.vlcbridge
      */
     private android.content.BroadcastReceiver debug;
 
@@ -111,7 +111,8 @@ public class SkipService extends NotificationListenerService
                 }
                 String k = i.getStringExtra("kind");
                 SkipOverlay.Kind kind = "next".equals(k) ? SkipOverlay.Kind.NEXT
-                        : "credits".equals(k) ? SkipOverlay.Kind.CREDITS : SkipOverlay.Kind.INTRO;
+                        : "credits".equals(k) ? SkipOverlay.Kind.CREDITS
+                        : "stinger".equals(k) ? SkipOverlay.Kind.STINGER : SkipOverlay.Kind.INTRO;
                 overlay.show(kind, new SkipOverlay.Listener() {
                     @Override public void onConfirm() { Log.i(TAG, "debug: confirm"); }
                     @Override public void onDismiss() { Log.i(TAG, "debug: dismiss"); }
@@ -216,6 +217,7 @@ public class SkipService extends NotificationListenerService
         overlay.setPaused(!playing);
 
         listen(pos);
+        findStingers();
         decide(pos);
     }
 
@@ -225,7 +227,7 @@ public class SkipService extends NotificationListenerService
         stopEars();
         key = k;
         durMs = 0;
-        startTried = endTried = false;
+        startTried = endTried = stingerTried = false;
         seg = loadSegments(k);
     }
 
@@ -241,9 +243,76 @@ public class SkipService extends NotificationListenerService
                 && (durMs <= 0 || pos < durMs - MIN_LEFT_CREDITS_MS)) {
             show(kCredits, hasNext() ? SkipOverlay.Kind.NEXT : SkipOverlay.Kind.CREDITS,
                     durMs > 0 ? durMs - 500 : credits[1]);
-        } else if (showing != null) {
+        } else if (!showStinger(pos) && showing != null) {
             hideOverlay(); // перемотали за пределы отрезка руками
         }
+    }
+
+    // ------------------------------------------------------------------ сцены после титров
+
+    private static final long STINGER_AFTER_GAP_MS = 25_000;   // дать досмотреть финал
+    private static final long STINGER_PREROLL_MS = 15_000;     // сцена начинается раньше первой реплики
+    private static final long STINGER_MIN_LEFT_MS = 40_000;
+
+    /** Фильм (не плейлист серий): по оглавлению MKV ищем сцены после титров. */
+    private void findStingers() {
+        if (stingerTried || seg.has("stingers")) return;
+        if (getSharedPreferences("launch", MODE_PRIVATE).getBoolean("playlist", false)) {
+            stingerTried = true;
+            return;
+        }
+        stingerTried = true;
+        final String k = key;
+        final String url = streamUrl(k);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                JSONArray arr = null;
+                for (int attempt = 0; attempt < 4 && arr == null; attempt++) {
+                    if (attempt > 0) SystemClock.sleep(10_000L * attempt);
+                    try {
+                        arr = new JSONArray();
+                        for (StingerFinder.Stinger st : StingerFinder.findInMkv(url)) {
+                            arr.put(new JSONArray().put(st.gapStart).put(st.sceneStart).put(st.sceneEnd));
+                        }
+                        Log.i(TAG, "Stingers " + k + ": " + arr);
+                    } catch (Exception e) {
+                        Log.w(TAG, "Stinger search failed: " + e);
+                        arr = null; // нули от TorrServer и т.п. — повторим
+                    }
+                }
+                final JSONArray res = arr != null ? arr : new JSONArray();
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            JSONObject s = k.equals(key) ? seg : loadSegments(k);
+                            s.put("stingers", res);
+                            getSharedPreferences("segments", MODE_PRIVATE).edit().putString(k, s.toString()).apply();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                });
+            }
+        }, "stinger").start();
+    }
+
+    /** Идут титры, а за ними сцена — предлагаем перемотать к ней. */
+    private boolean showStinger(long pos) {
+        JSONArray st = seg.optJSONArray("stingers");
+        if (st == null) return false;
+        for (int i = 0; i < st.length(); i++) {
+            JSONArray a = st.optJSONArray(i);
+            if (a == null) continue;
+            long gap = (long) (a.optDouble(0) * 1000), scene = (long) (a.optDouble(1) * 1000);
+            String what = key + ":stinger" + i;
+            if (!handled.contains(what) && pos >= gap + STINGER_AFTER_GAP_MS
+                    && pos < scene - STINGER_PREROLL_MS - STINGER_MIN_LEFT_MS) {
+                show(what, SkipOverlay.Kind.STINGER, scene - STINGER_PREROLL_MS);
+                return true;
+            }
+        }
+        return false;
     }
 
     private void show(final String what, final SkipOverlay.Kind kind, final long target) {

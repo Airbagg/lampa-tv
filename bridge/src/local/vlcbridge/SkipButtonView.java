@@ -101,7 +101,8 @@ class SkipButtonView extends View implements Choreographer.FrameCallback {
         DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
         u = Math.max(dm.widthPixels, dm.heightPixels) / 1920f;
         label = kind == SkipOverlay.Kind.INTRO ? "Пропустить заставку"
-                : kind == SkipOverlay.Kind.NEXT ? "Следующая серия" : "Пропустить титры";
+                : kind == SkipOverlay.Kind.NEXT ? "Следующая серия"
+                : kind == SkipOverlay.Kind.STINGER ? "К сцене после титров" : "Пропустить титры";
         countdown = kind == SkipOverlay.Kind.INTRO ? INTRO_MS : CREDITS_MS;
 
         setLayerType(LAYER_TYPE_SOFTWARE, null); // тени setShadowLayer у фигур
@@ -131,7 +132,7 @@ class SkipButtonView extends View implements Choreographer.FrameCallback {
 
         textW = textLight.measureText(label);
         plateW = (PAD_L + ICON + GAP + PAD_R) * u + textW;
-        String[] glyph = kind == SkipOverlay.Kind.INTRO ? new String[]{
+        String[] glyph = kind == SkipOverlay.Kind.INTRO || kind == SkipOverlay.Kind.STINGER ? new String[]{
                 "M3,9.4Q3,7 4.97,8.37L14.03,14.63Q16,16 14.03,17.37L4.97,23.63Q3,25 3,22.6Z",
                 "M16,9.4Q16,7 17.97,8.37L27.03,14.63Q29,16 27.03,17.37L17.97,23.63Q16,25 16,22.6Z"}
                 : new String[]{
