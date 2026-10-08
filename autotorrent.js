@@ -182,9 +182,26 @@
         return parts.join(' · ');
     }
 
-    // После открытия списка файлов: ждём, пока Лампа его нарисует и
-    // сфокусирует серию, на которой остановились, и жмём на неё.
-    function autoplayFiles() {
+    // Файл, на котором остановились. Лампа сама подсвечивает серию по своей
+    // истории просмотра, но внешний плеер ей позицию не возвращает — поэтому
+    // берём из TorrServer: он помнит каждый открытый файл раздачи (params.viewed).
+    // Самый дальний открытый — туда и идём; VLC продолжит с места внутри серии,
+    // а плейлист посредника — следующие серии.
+    function continueIndex(items, params) {
+        var viewed = (params && params.viewed) || [];
+        var lastId = -1;
+        for (var i = 0; i < viewed.length; i++) {
+            var id = parseInt(viewed[i].file_index, 10);
+            if (!isNaN(id) && id > lastId) lastId = id;
+        }
+        if (lastId < 0) return -1;
+        for (var k = 0; k < items.length; k++) if (items[k].id == lastId) return k;
+        return -1;
+    }
+
+    // После открытия списка файлов: ждём, пока Лампа его нарисует, и жмём
+    // на серию, на которой остановились (или на ту, что Лампа сфокусировала).
+    function autoplayFiles(items, params) {
         var cancelled = false;
         var started = Date.now();
 
@@ -200,8 +217,8 @@
 
         function waitList() {
             var box = $('.torrent-files');
-            var items = box.find('.selector');
-            if (!items.length) {
+            var found = box.find('.selector');
+            if (!found.length) {
                 if (Date.now() - started < 15000) setTimeout(waitList, 300);
                 return;
             }
@@ -209,16 +226,22 @@
             // глушим его так же, как это делает нажатие любой кнопки.
             try { Lampa.Keypad.listener.send('keydown', {code: 0, enabled: true, event: {}}); } catch (e) {}
 
+            var files = box.find('.torrent-file, .torrent-serial');
+            var k = continueIndex(items, params);
+            var target = k >= 0 && files.eq(k).length ? files.eq(k) : box.find('.selector.focus').first();
+            if (!target.length) target = files.length ? files.first() : found.first();
+            var what = k >= 0 && items[k] ? (items[k].path_human || items[k].path || '').split('/').pop() : '';
+
             setTimeout(function () {
                 if (cancelled) return;
                 try { Lampa.Keypad.listener.follow('keydown', onKey); } catch (e) {}
-                noty('Авто: запуск через ' + COUNTDOWN_SEC + ' с · любая кнопка — отмена');
+                noty('Авто: ' + (what ? 'продолжаю «' + what + '» ' : '') +
+                    'через ' + COUNTDOWN_SEC + ' с · любая кнопка — отмена');
 
                 setTimeout(function () {
                     cleanup();
                     if (cancelled) return;
-                    var target = box.find('.selector.focus').first();
-                    if (!target.length) target = items.first();
+                    log('play', k, what);
                     target.trigger('hover:enter');
                 }, COUNTDOWN_SEC * 1000);
             }, 200);
@@ -247,7 +270,7 @@
             var onList = function (e) {
                 if (e.type == 'list_open') {
                     Lampa.Listener.remove('torrent_file', onList);
-                    autoplayFiles();
+                    autoplayFiles(e.items || [], e.params || {});
                 }
             };
             Lampa.Listener.follow('torrent_file', onList);
