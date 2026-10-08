@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="local.vlcbridge"
-    android:versionCode="6"
-    android:versionName="1.5">
+    android:versionCode="7"
+    android:versionName="2.0">
 
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34" />
 
     <!-- Проба кодека читает начало потока с TorrServer (http://127.0.0.1:8090) -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Кнопка «Пропустить заставку» поверх плеера -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- Чтобы на Android 11+ видеть плееры и запускать их по имени пакета -->
     <queries>
@@ -37,5 +39,18 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
+
+        <!-- Пропуск заставок и титров. NotificationListener — единственный способ
+             читать позицию и перематывать чужой плеер (медиасессии). Включается
+             пользователем: Настройки → Приложения → Спец. доступ → Доступ к уведомлениям. -->
+        <service
+            android:name=".SkipService"
+            android:exported="true"
+            android:label="Пропуск заставок"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

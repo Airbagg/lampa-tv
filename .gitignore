@@ -1,3 +1,5 @@
 bridge/build/
 bridge/release.keystore
 .DS_Store
+skipper/cache.json
+skipper/__pycache__/

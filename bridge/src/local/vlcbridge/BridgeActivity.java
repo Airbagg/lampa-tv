@@ -59,14 +59,14 @@ public class BridgeActivity extends Activity {
 
         String scheme = uri.getScheme();
         if (!"http".equals(scheme) && !"https".equals(scheme)) {
-            handOver(in, VLC, "not http", null);
+            handOver(in, VLC, "not http", null, null);
             return;
         }
 
         main.postDelayed(new Runnable() {
             @Override
             public void run() {
-                handOver(in, VLC, "probe timeout", seriesPlaylist(uri, false));
+                handOver(in, VLC, "probe timeout", seriesPlaylist(uri, null), null);
             }
         }, PROBE_TIMEOUT_MS);
 
@@ -76,12 +76,13 @@ public class BridgeActivity extends Activity {
                 final long started = android.os.SystemClock.elapsedRealtime();
                 final String mime = probeVideoMime(uri);
                 final boolean av1 = MIME_AV1.equals(mime) && isInstalled(JUST_PLAYER);
-                final Uri playlist = av1 ? null : seriesPlaylist(uri, true);
+                final org.json.JSONArray files = fetchFiles(uri);
+                final Uri playlist = av1 ? null : seriesPlaylist(uri, files);
                 final long took = android.os.SystemClock.elapsedRealtime() - started;
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        handOver(in, av1 ? JUST_PLAYER : VLC, "video " + mime + " in " + took + " ms", playlist);
+                        handOver(in, av1 ? JUST_PLAYER : VLC, "video " + mime + " in " + took + " ms", playlist, files);
                     }
                 });
             }
@@ -240,14 +241,14 @@ public class BridgeActivity extends Activity {
      * если это серия: в имени есть S01E02 / «серия» и т.п., или (askServer) в той
      * же папке раздачи лежат ещё видео — имена вида «01. Название.mkv».
      */
-    static Uri seriesPlaylist(Uri uri, boolean askServer) {
+    static Uri seriesPlaylist(Uri uri, org.json.JSONArray files) {
         if (uri == null || uri.getQueryParameter("link") == null
                 || uri.getQueryParameter("index") == null
                 || uri.getPath() == null || !uri.getPath().contains("/stream/")) return null;
         String file = uri.getLastPathSegment();
         if (file == null) return null;
         boolean series = EPISODE.matcher(file).find();
-        if (!series && askServer) series = hasSiblingVideos(uri);
+        if (!series && files != null) series = hasSiblingVideos(files, Integer.parseInt(uri.getQueryParameter("index")));
         if (!series) return null;
 
         Uri.Builder b = uri.buildUpon().clearQuery();
@@ -258,48 +259,82 @@ public class BridgeActivity extends Activity {
         return b.appendQueryParameter("m3u", "").build();
     }
 
-    private static boolean hasSiblingVideos(Uri uri) {
+    /** Список файлов раздачи из TorrServer (file_stats) или null. */
+    static org.json.JSONArray fetchFiles(Uri uri) {
+        if (uri == null || uri.getQueryParameter("link") == null) return null;
         java.net.HttpURLConnection conn = null;
         try {
-            String hash = uri.getQueryParameter("link");
-            int index = Integer.parseInt(uri.getQueryParameter("index"));
             java.net.URL url = new java.net.URL(uri.getScheme() + "://" + uri.getEncodedAuthority() + "/torrents");
             conn = (java.net.HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(2000);
             conn.setReadTimeout(3000);
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json");
-            conn.getOutputStream().write(("{\"action\":\"get\",\"hash\":\"" + hash + "\"}").getBytes("UTF-8"));
+            conn.getOutputStream().write(("{\"action\":\"get\",\"hash\":\""
+                    + uri.getQueryParameter("link") + "\"}").getBytes("UTF-8"));
             java.io.InputStream is = conn.getInputStream();
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
             byte[] b = new byte[16384];
             int n;
             while ((n = is.read(b)) > 0) bos.write(b, 0, n);
-            org.json.JSONArray files = new org.json.JSONObject(bos.toString("UTF-8")).optJSONArray("file_stats");
-            if (files == null) return false;
-
-            String dir = null;
-            for (int i = 0; i < files.length(); i++) {
-                org.json.JSONObject f = files.getJSONObject(i);
-                if (f.optInt("id") == index) {
-                    String path = f.optString("path");
-                    dir = path.contains("/") ? path.substring(0, path.lastIndexOf('/')) : "";
-                }
-            }
-            if (dir == null) return false;
-            int videos = 0;
-            for (int i = 0; i < files.length(); i++) {
-                String path = files.getJSONObject(i).optString("path");
-                String d = path.contains("/") ? path.substring(0, path.lastIndexOf('/')) : "";
-                if (d.equals(dir) && VIDEO_EXT.matcher(path).find()) videos++;
-            }
-            return videos >= 2;
+            return new org.json.JSONObject(bos.toString("UTF-8")).optJSONArray("file_stats");
         } catch (Exception e) {
-            Log.w(TAG, "Sibling check failed: " + e);
+            Log.w(TAG, "File list failed: " + e);
+            return null;
         } finally {
             if (conn != null) conn.disconnect();
         }
-        return false;
+    }
+
+    private static String dirOf(String path) {
+        return path.contains("/") ? path.substring(0, path.lastIndexOf('/')) : "";
+    }
+
+    static boolean hasSiblingVideos(org.json.JSONArray files, int index) {
+        String dir = null;
+        for (int i = 0; i < files.length(); i++) {
+            org.json.JSONObject f = files.optJSONObject(i);
+            if (f != null && f.optInt("id") == index) dir = dirOf(f.optString("path"));
+        }
+        if (dir == null) return false;
+        int videos = 0;
+        for (int i = 0; i < files.length(); i++) {
+            org.json.JSONObject f = files.optJSONObject(i);
+            if (f == null) continue;
+            String path = f.optString("path");
+            if (dirOf(path).equals(dir) && VIDEO_EXT.matcher(path).find()) videos++;
+        }
+        return videos >= 2;
+    }
+
+    /**
+     * Что запустили — для службы пропуска заставок (SkipService): раздача,
+     * файл и имена видеофайлов, чтобы узнавать пункты плейлиста VLC по названию.
+     */
+    private void saveLaunch(Uri uri, org.json.JSONArray files, boolean playlist) {
+        try {
+            if (uri == null || uri.getQueryParameter("link") == null) return;
+            org.json.JSONArray names = new org.json.JSONArray();
+            if (files != null) {
+                for (int i = 0; i < files.length(); i++) {
+                    org.json.JSONObject f = files.optJSONObject(i);
+                    if (f == null || !VIDEO_EXT.matcher(f.optString("path")).find()) continue;
+                    String path = f.optString("path");
+                    names.put(new org.json.JSONObject()
+                            .put("id", f.optInt("id"))
+                            .put("name", path.substring(path.lastIndexOf('/') + 1)));
+                }
+            }
+            getSharedPreferences("launch", MODE_PRIVATE).edit()
+                    .putString("hash", uri.getQueryParameter("link").toLowerCase())
+                    .putInt("index", Integer.parseInt(uri.getQueryParameter("index")))
+                    .putBoolean("playlist", playlist)
+                    .putString("files", names.toString())
+                    .putLong("time", System.currentTimeMillis())
+                    .apply();
+        } catch (Exception e) {
+            Log.w(TAG, "saveLaunch failed: " + e);
+        }
     }
 
     private boolean isInstalled(String pkg) {
@@ -311,7 +346,7 @@ public class BridgeActivity extends Activity {
         }
     }
 
-    private void handOver(Intent in, String pkg, String reason, Uri playlist) {
+    private void handOver(Intent in, String pkg, String reason, Uri playlist, org.json.JSONArray files) {
         if (!handedOver.compareAndSet(false, true)) return;
         main.removeCallbacksAndMessages(null);
 
@@ -322,6 +357,7 @@ public class BridgeActivity extends Activity {
         // раздачи (TorrServer сам строит m3u от index), следующая серия
         // включится сама. Just Player m3u от TorrServer не понимает.
         if (!VLC.equals(pkg)) playlist = null;
+        saveLaunch(data, files, playlist != null);
         if (playlist != null) {
             data = playlist;
             reason += ", playlist";
