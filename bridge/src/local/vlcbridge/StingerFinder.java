@@ -57,6 +57,15 @@ public final class StingerFinder {
      * песни в титрах.
      */
     public static List<Stinger> find(List<double[]> cues, double duration) {
+        return find(cues, duration, new double[0]);
+    }
+
+    /**
+     * evidence — моменты, где точно что-то происходит в кадре, хотя полные
+     * субтитры молчат: строки SDH со звуками («[рычание]»), не про музыку.
+     * Засчитываются как реплики без голосования — так видна немая сцена.
+     */
+    public static List<Stinger> find(List<double[]> cues, double duration, double[] evidence) {
         List<Stinger> res = new ArrayList<>();
         if (cues.isEmpty() || duration < 70 * 60) return res;
         int bins = (int) Math.ceil(duration / BIN) + 1;
@@ -70,10 +79,15 @@ public final class StingerFinder {
             for (int b = 0; b < bins; b++) if (hit[b]) votes[b]++;
         }
         int need = Math.max(1, cues.size() / 2);
+        boolean[] forced = new boolean[bins];
+        for (double t : evidence) {
+            int b = (int) (t / BIN);
+            if (b >= 0 && b < bins) forced[b] = true;
+        }
         List<Double> speech = new ArrayList<>();
         for (int b = 0; b < bins; b++) {
             double t = b * BIN;
-            if (votes[b] >= need && t >= duration - TAIL_SEC) speech.add(t);
+            if ((votes[b] >= need || forced[b]) && t >= duration - TAIL_SEC) speech.add(t);
         }
         if (speech.size() < 2) return res;
 
@@ -108,7 +122,24 @@ public final class StingerFinder {
             ID_SEEKID = 0x53AB, ID_SEEKPOS = 0x53AC, ID_INFO = 0x1549A966, ID_TIMESCALE = 0x2AD7B1,
             ID_DURATION = 0x4489, ID_TRACKS = 0x1654AE6B, ID_TRACKENTRY = 0xAE, ID_TRACKNUM = 0xD7,
             ID_TRACKTYPE = 0x83, ID_FORCED = 0x55AA, ID_NAME = 0x536E, ID_CLUSTER = 0x1F43B675,
-            ID_CUES = 0x1C53BB6B, ID_CUEPOINT = 0xBB, ID_CUETIME = 0xB3, ID_CUETRACKPOS = 0xB7, ID_CUETRACK = 0xF7;
+            ID_CUES = 0x1C53BB6B, ID_CUEPOINT = 0xBB, ID_CUETIME = 0xB3, ID_CUETRACKPOS = 0xB7, ID_CUETRACK = 0xF7,
+            ID_CODEC = 0x86, ID_HEARING = 0x55AB, ID_CUECLUSTER = 0xF1, ID_CUERELPOS = 0xF0,
+            ID_SIMPLEBLOCK = 0xA3, ID_BLOCKGROUP = 0xA0, ID_BLOCK = 0xA1;
+
+    /** Строка SDH: где лежит её блок, чтобы прочитать текст. */
+    private static final class SdhCue {
+        final double time;
+        final long cluster; // абсолютная позиция кластера
+        final long rel;     // смещение блока от начала ДАННЫХ кластера
+        final boolean ass;
+
+        SdhCue(double time, long cluster, long rel, boolean ass) {
+            this.time = time;
+            this.cluster = cluster;
+            this.rel = rel;
+            this.ass = ass;
+        }
+    }
 
     /** Сцены после титров для MKV по адресу (Range-запросы к TorrServer). Пусто — не нашли. */
     public static List<Stinger> findInMkv(String url) throws Exception {
@@ -123,6 +154,7 @@ public final class StingerFinder {
         double duration = 0;
         long cuesPos = -1;
         List<Integer> subs = new ArrayList<>();
+        java.util.Map<Integer, Boolean> sdh = new java.util.HashMap<>(); // дорожка → ASS?
         int p = (int) segData;
         while (p < head.length) {
             int end = next(head, p, head.length, e);
@@ -159,18 +191,25 @@ public final class StingerFinder {
                     int qe = next(head, q, d + s, e);
                     if (e[0] == ID_TRACKENTRY) {
                         int td = e[1], ts = e[2];
-                        long num = -1, type = 0, forced = 0;
-                        String name = "";
+                        long num = -1, type = 0, forced = 0, hearing = 0;
+                        String name = "", codec = "";
                         for (int r = td; r < td + ts; ) {
                             int re = next(head, r, td + ts, e);
                             if (e[0] == ID_TRACKNUM) num = uint(head, e[1], e[2]);
                             else if (e[0] == ID_TRACKTYPE) type = uint(head, e[1], e[2]);
                             else if (e[0] == ID_FORCED) forced = uint(head, e[1], e[2]);
                             else if (e[0] == ID_NAME) name = new String(head, e[1], e[2], "UTF-8").toLowerCase();
+                            else if (e[0] == ID_CODEC) codec = new String(head, e[1], e[2], "US-ASCII");
+                            else if (e[0] == ID_HEARING) hearing = uint(head, e[1], e[2]);
                             r = re;
                         }
                         // Только полные субтитры: «forced» подписывают лишь надписи
-                        if (type == 0x11 && forced == 0 && !name.contains("forced") && !name.contains("форс"))
+                        // Для глухих — отдельно: там подписана и музыка в титрах, в голосование
+                        // их не берём, а текст в конце фильма читаем (PGS не прочитать — пропускаем)
+                        boolean isSdh = hearing != 0 || SDH_NAME.matcher(name).find();
+                        if (type == 0x11 && isSdh && codec.startsWith("S_TEXT/"))
+                            sdh.put((int) num, codec.contains("ASS") || codec.contains("SSA"));
+                        else if (type == 0x11 && !isSdh && forced == 0 && !name.contains("forced") && !name.contains("форс"))
                             subs.add((int) num);
                     }
                     q = qe;
@@ -187,6 +226,7 @@ public final class StingerFinder {
         int hdr = e[1];
         byte[] cues = fetch(url, cuesPos, hdr + e[2]);
 
+        List<SdhCue> sdhCues = new ArrayList<>();
         List<List<Double>> perTrack = new ArrayList<>();
         for (int k = 0; k < subs.size(); k++) perTrack.add(new ArrayList<Double>());
         for (int q = hdr; q < cues.length; ) {
@@ -195,23 +235,30 @@ public final class StingerFinder {
             if (e[0] == ID_CUEPOINT) {
                 int cd = e[1], cs = e[2];
                 double t = -1;
-                List<Integer> tracks = new ArrayList<>();
+                List<long[]> tracks = new ArrayList<>(); // {дорожка, кластер, смещение в кластере}
                 for (int r = cd; r < cd + cs; ) {
                     int re = next(cues, r, cd + cs, e);
                     if (e[0] == ID_CUETIME) t = uint(cues, e[1], e[2]) * timescale / 1e9;
                     else if (e[0] == ID_CUETRACKPOS) {
                         int pd = e[1], ps = e[2];
+                        long[] tp = {-1, -1, -1};
                         for (int w = pd; w < pd + ps; ) {
                             int we = next(cues, w, pd + ps, e);
-                            if (e[0] == ID_CUETRACK) tracks.add((int) uint(cues, e[1], e[2]));
+                            if (e[0] == ID_CUETRACK) tp[0] = uint(cues, e[1], e[2]);
+                            else if (e[0] == ID_CUECLUSTER) tp[1] = uint(cues, e[1], e[2]);
+                            else if (e[0] == ID_CUERELPOS) tp[2] = uint(cues, e[1], e[2]);
                             w = we;
                         }
+                        tracks.add(tp);
                     }
                     r = re;
                 }
-                for (int tr : tracks) {
-                    int k = subs.indexOf(tr);
+                for (long[] tp : tracks) {
+                    int k = subs.indexOf((int) tp[0]);
                     if (k >= 0 && t >= 0) perTrack.get(k).add(t);
+                    Boolean ass = sdh.get((int) tp[0]);
+                    if (ass != null && t >= durSec - TAIL_SEC && tp[1] >= 0 && tp[2] >= 0)
+                        sdhCues.add(new SdhCue(t, segData + tp[1], tp[2], ass));
                 }
             }
             q = qe;
@@ -224,7 +271,85 @@ public final class StingerFinder {
             Arrays.sort(a);
             tracks.add(a);
         }
-        return find(tracks, durSec);
+        List<Stinger> plain = find(tracks, durSec);
+        if (sdhCues.isEmpty()) return plain;
+
+        // Титры начинаются там, где кончаются реплики фильма; SDH после этого места —
+        // кандидаты в немую сцену. Читаем их текст (по несколько байт) и отбрасываем музыку.
+        double creditsFrom = !plain.isEmpty() ? plain.get(0).gapStart : lastSpeech(tracks);
+        List<Double> evidence = new ArrayList<>();
+        int read = 0;
+        for (SdhCue c : sdhCues) {
+            if (c.time <= creditsFrom || read >= MAX_SDH_READS) continue;
+            read++;
+            try {
+                String txt = blockText(url, c.cluster, c.rel, c.ass);
+                if (txt != null && !txt.isEmpty() && !MUSIC.matcher(txt.toLowerCase()).find()) evidence.add(c.time);
+            } catch (Exception ignored) {
+            }
+        }
+        if (evidence.isEmpty()) return plain;
+        double[] ev = new double[evidence.size()];
+        for (int k = 0; k < ev.length; k++) ev[k] = evidence.get(k);
+        return find(tracks, durSec, ev);
+    }
+
+    static final int MAX_SDH_READS = 60;
+    static final java.util.regex.Pattern SDH_NAME = java.util.regex.Pattern.compile(
+            "sdh|\\bcc\\b|hearing|глух|слабослыш|\\bhoh\\b");
+    /** Строка SDH про музыку — это титры, а не сцена. */
+    static final java.util.regex.Pattern MUSIC = java.util.regex.Pattern.compile(
+            "♪|♫|music|song|melod|singing|instrumental|музык|песн|мелоди|поёт|поет|поют|играет|звучит");
+
+    /** Сцен со словами после титров нет — значит, титры идут от последней реплики. */
+    private static double lastSpeech(List<double[]> tracks) {
+        double last = 0;
+        for (double[] t : tracks) if (t.length > 0) last = Math.max(last, t[t.length - 1]);
+        return last;
+    }
+
+    /**
+     * Текст строки субтитров (SimpleBlock или BlockGroup→Block). CueRelativePosition
+     * отсчитывается от начала данных кластера, поэтому сначала читаем его заголовок.
+     */
+    static String blockText(String url, long cluster, long rel, boolean ass) throws Exception {
+        byte[] ch = fetch(url, cluster, 16);
+        int[] e = new int[3];
+        if (next(ch, 0, ch.length, e) < 0 || e[0] != ID_CLUSTER) return null;
+        byte[] b = fetch(url, cluster + e[1] + rel, 4096);
+        int end = next(b, 0, b.length, e);
+        if (end < 0) return null;
+        int d = e[1], s = e[2];
+        if (e[0] == ID_BLOCKGROUP) {
+            boolean found = false;
+            for (int q = d; q < Math.min(d + s, b.length); ) {
+                int qe = next(b, q, Math.min(d + s, b.length), e);
+                if (qe < 0) break;
+                if (e[0] == ID_BLOCK) {
+                    d = e[1];
+                    s = e[2];
+                    found = true;
+                    break;
+                }
+                q = qe;
+            }
+            if (!found) return null;
+        } else if (e[0] != ID_SIMPLEBLOCK) {
+            return null;
+        }
+        long[] v = new long[2];
+        int n = vint(b, d, true, v);               // номер дорожки
+        int payload = d + n + 3;                     // + int16 время + флаги
+        int len = Math.min(s - n - 3, b.length - payload);
+        if (len <= 0) return "";
+        String txt = new String(b, payload, len, "UTF-8");
+        if (ass) {
+            // ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+            int c = 0, i = 0;
+            while (c < 8 && i < txt.length()) if (txt.charAt(i++) == ',') c++;
+            txt = txt.substring(i);
+        }
+        return txt.replaceAll("\\{[^}]*\\}|<[^>]*>|\\\\N", " ").trim();
     }
 
     /** Элемент EBML с позиции i: out = {id, начало данных, размер}; возвращает конец элемента. */

@@ -217,7 +217,7 @@ public class SkipService extends NotificationListenerService
         overlay.setPaused(!playing);
 
         listen(pos);
-        findStingers();
+        findStingers(pos);
         decide(pos);
     }
 
@@ -254,9 +254,16 @@ public class SkipService extends NotificationListenerService
     private static final long STINGER_PREROLL_MS = 15_000;     // сцена начинается раньше первой реплики
     private static final long STINGER_MIN_LEFT_MS = 40_000;
 
-    /** Фильм (не плейлист серий): по оглавлению MKV ищем сцены после титров. */
-    private void findStingers() {
+    private static final long STINGER_SEARCH_BEFORE_END_MS = 25 * 60_000L;
+
+    /**
+     * Фильм (не плейлист серий): по оглавлению MKV ищем сцены после титров.
+     * Ищем за 25 минут до конца: строки SDH лежат в зоне титров, и читать их
+     * раньше — заставлять TorrServer качать конец фильма заранее.
+     */
+    private void findStingers(long posMs) {
         if (stingerTried || seg.has("stingers")) return;
+        if (durMs <= 0 || posMs < durMs - STINGER_SEARCH_BEFORE_END_MS) return;
         if (getSharedPreferences("launch", MODE_PRIVATE).getBoolean("playlist", false)) {
             stingerTried = true;
             return;
