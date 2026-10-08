@@ -250,7 +250,7 @@ public class SkipService extends NotificationListenerService
 
     // ------------------------------------------------------------------ сцены после титров
 
-    private static final long STINGER_AFTER_GAP_MS = 25_000;   // дать досмотреть финал
+    private static final long STINGER_AFTER_GAP_MS = 5_000;    // через 5 с после последней реплики
     private static final long STINGER_PREROLL_MS = 15_000;     // сцена начинается раньше первой реплики
     private static final long STINGER_MIN_LEFT_MS = 40_000;
 
