@@ -280,6 +280,16 @@
             if (k >= 0) return done(k, 'память');
         }
 
+        // Своя история Лампы: строка «Torrent • Сезон 2 • Серия 1» в торрентах
+        try {
+            var key = Lampa.Utils.hash(card.number_of_seasons ? card.original_name : card.original_title);
+            var w = (Lampa.Storage.cache('online_watched_last', 5000, {}) || {})[key];
+            if (w && w.season && w.episode) {
+                var kw = findEpisode(items, [parseInt(w.season, 10), parseInt(w.episode, 10)]);
+                if (kw >= 0) return done(kw, 'лампа');
+            }
+        } catch (e) {}
+
         var link = '';
         for (var i = 0; i < items.length && !link; i++) {
             var m = (items[i].url || '').match(/[?&]link=([0-9a-f]{40})/i);
