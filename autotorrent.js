@@ -317,7 +317,8 @@
         var cancelled = false;
         var started = Date.now();
 
-        function onKey() {
+        function onKey(e) {
+            log('cancel by key', e && e.code);
             cancelled = true;
             noty('Авто: запуск отменён, выберите файл сами');
             cleanup();
@@ -353,6 +354,11 @@
 
                 setTimeout(function () {
                     cleanup();
+                    var ev = null;
+                    try { ev = $._data(target[0], 'events'); } catch (e) {}
+                    log('fire', {cancelled: cancelled, inDoc: $.contains(document, target[0]),
+                        cls: target.attr('class'), events: ev ? Object.keys(ev) : null,
+                        jq: !!(window.jQuery && $ === window.jQuery)});
                     if (cancelled || !$.contains(document, target[0])) return;
                     target.trigger('hover:enter');
                 }, COUNTDOWN_SEC * 1000);
