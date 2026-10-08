@@ -24,6 +24,11 @@ javac -source 8 -target 8 -Xlint:-options -classpath "$ANDROID_JAR" \
 
 (cd build/dex && zip -q ../unsigned.apk classes.dex)
 
+# ffmpeg для «слуха» серий: кладём как нативную библиотеку, чтобы Android
+# распаковал его в nativeLibraryDir с правом запуска (extractNativeLibs=true)
+mkdir -p build/apklib/lib && cp -R native/armeabi-v7a build/apklib/lib/
+(cd build/apklib && zip -qr ../unsigned.apk lib)
+
 "$BT/zipalign" -f -p 4 build/unsigned.apk build/aligned.apk
 
 if [ ! -f release.keystore ]; then

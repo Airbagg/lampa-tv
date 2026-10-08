@@ -131,7 +131,7 @@ public class SkipService extends NotificationListenerService
     private void debugListen(final String hash, final int index, final String part, final int sec) {
         final String k = hash + ":" + index;
         final long t0 = SystemClock.elapsedRealtime();
-        new Thread(new EpisodeListener(streamUrl(k), 0, sec * 1_000_000L, new EpisodeListener.Clock() {
+        new Thread(new EpisodeListener(ffmpeg(), streamUrl(k), 0, sec * 1_000_000L, new EpisodeListener.Clock() {
             @Override
             public long playerUs() {
                 return Long.MAX_VALUE / 4; // без привязки к плееру
@@ -304,7 +304,7 @@ public class SkipService extends NotificationListenerService
         if (!startTried) {
             startTried = true;
             if (posMs / 1000.0 < START_LISTEN_MAX_POS && !seg.has("intro")) {
-                startEar = new EpisodeListener(url, 0, (long) (START_SCAN_SEC * 1e6), clock,
+                startEar = new EpisodeListener(ffmpeg(), url, 0, (long) (START_SCAN_SEC * 1e6), clock,
                         new EpisodeListener.Progress() {
                             @Override
                             public void onPrint(final int[] print, final double head) {
@@ -336,7 +336,7 @@ public class SkipService extends NotificationListenerService
             endTried = true;
             if (!seg.has("credits")) {
                 final double from = Math.max(0, durMs / 1000.0 - END_SCAN_SEC);
-                endEar = new EpisodeListener(url, (long) (from * 1e6), durMs * 1000, clock,
+                endEar = new EpisodeListener(ffmpeg(), url, (long) (from * 1e6), durMs * 1000, clock,
                         new EpisodeListener.Progress() {
                             @Override
                             public void onPrint(final int[] print, double head) {
@@ -526,6 +526,11 @@ public class SkipService extends NotificationListenerService
         }
         if (launch.getBoolean("playlist", false)) return null; // пункт плейлиста, а мы его не узнали
         return index >= 0 ? hash + ":" + index : null;
+    }
+
+    /** Встроенный ffmpeg — Android распаковал его как нативную библиотеку. */
+    private String ffmpeg() {
+        return getApplicationInfo().nativeLibraryDir + "/libffmpeg.so";
     }
 
     private String streamUrl(String k) {
