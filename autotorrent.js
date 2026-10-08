@@ -10,7 +10,7 @@
  * Как выбирается раздача (больше очков — лучше):
  *  - раздача, которую уже смотрели в этой карточке, — та же озвучка, без сюрпризов;
  *  - русский дубляж > многоголосый > авторский, без русской озвучки — минус;
- *  - 1080p; 4K только если битрейт пролезает в канал (~15 Мбит/с);
+ *  - 4K, если поток пролезает в канал (~30 Мбит/с) и сидов хватает, иначе 1080p;
  *  - AV1 в минус (VLC 3 не умеет его аппаратно, уйдёт в Just Player);
  *  - Dolby Vision без HDR10 в минус (на не-DV экране зелёно-фиолетовые цвета);
  *  - больше сидов — лучше, меньше 2 сидов — только если нет ничего другого;
@@ -22,7 +22,9 @@
     if (window.lampa_tv_autotorrent) return;
     window.lampa_tv_autotorrent = true;
 
-    var LINK_MBPS = 15;
+    // Сколько тянет канал: 4K-раздача на 26.5 Мбит/с шла без подвисаний
+    var LINK_MBPS = 30;
+    var SEEDS_FOR_4K = 15;
     var COUNTDOWN_SEC = 3;
     var ICON = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
         '<path d="M7 4.5v15l12-7.5z" fill="currentColor"/>' +
@@ -138,7 +140,13 @@
         if (rec && rec.torrent && el.hash == rec.torrent) { s += 200; why.push('последняя'); }
         else if (el.hash && viewedHashes.indexOf(el.hash) >= 0) { s += 40; why.push('смотрели'); }
 
-        s += ({2160: 90, 1080: 100, 720: 70})[res] || (res ? 30 : 50);
+        var mbps = 0;
+        var rt = runtimeMin(card);
+        if (!isSerial && rt && sizeBytes(el)) mbps = sizeBytes(el) * 8 / (rt * 60) / 1e6;
+
+        // Экран 4K: 4K лучше 1080p, но только если раздача живая и поток не тяжелее канала
+        var fits4k = seeds >= SEEDS_FOR_4K && (isSerial || !mbps || mbps <= LINK_MBPS);
+        s += ({2160: fits4k ? 115 : 80, 1080: 100, 720: 70})[res] || (res ? 30 : 50);
         s += ({dub: 50, mvo: 25, avo: 10, ru: 5, none: -30})[voice];
 
         if (cod == 'av1') s -= 80;
@@ -147,10 +155,7 @@
         if (seeds < 2) s -= 100;
         s += Math.min(40, Math.log(seeds + 1) / Math.LN2 * 6);
 
-        var mbps = 0;
-        var rt = runtimeMin(card);
-        if (!isSerial && rt && sizeBytes(el)) {
-            mbps = sizeBytes(el) * 8 / (rt * 60) / 1e6;
+        if (mbps) {
             if (mbps > LINK_MBPS) s -= (mbps - LINK_MBPS) * 4;
             if (res >= 1080 && mbps < 2) s -= 20;
         }
@@ -376,6 +381,9 @@
 
             var el = best.el;
             el.poster = card.img;
+            el.title = el.title || el.Title;
+            el.seeds = el.seeds || el.Seeders;
+            el.grabs = el.grabs || el.Peers;
             setRecord(card.id, {torrent: el.hash, title: el.Title});
 
             var onList = function (e) {
